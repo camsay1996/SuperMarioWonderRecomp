@@ -1,6 +1,6 @@
 # Development environment for SwitchGamesRecomp (Windows).
 # Usage, in PowerShell:  . .\dev.ps1
-$vs = "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools"
+$vs = "C:\Program Files (x86)\Microsoft Visual Studio\18\BuildTools"
 $env:PATH = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer;$env:PATH"  # vswhere, which VsDevCmd calls
 Import-Module "$vs\Common7\Tools\Microsoft.VisualStudio.DevShell.dll"
 Enter-VsDevShell -VsInstallPath $vs -SkipAutomaticLocation -DevCmdArguments "-arch=x64 -host_arch=x64" | Out-Null
@@ -13,3 +13,4 @@ if (-not $env:VULKAN_SDK) { $env:VULKAN_SDK = (Get-ChildItem C:\VulkanSDK -Direc
 $env:PATH = "$env:VULKAN_SDK\Bin;$env:PATH"
 Set-Location $PSScriptRoot
 Write-Host "SwitchGamesRecomp dev env: clang $((clang-cl --version)[0] -replace '.*version ','') | $(Get-Location)"
+
