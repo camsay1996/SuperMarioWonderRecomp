@@ -462,7 +462,43 @@ LONG WINAPI throw_tracer(EXCEPTION_POINTERS* e) {
     return EXCEPTION_CONTINUE_SEARCH;
 }
 
+// settings.ini next to the exe: each "key=value" line becomes the environment variable NX_KEY=value.
+// A variable that is already set wins, so a command line or a .bat always overrides the file.
+static void load_settings_ini() {
+    wchar_t buf[MAX_PATH * 2];
+    const DWORD cap = DWORD(sizeof buf / sizeof buf[0]);
+    DWORD n = GetModuleFileNameW(nullptr, buf, cap);
+    if (n == 0 || n >= cap) return;
+    std::wstring path(buf, n);
+    size_t slash = path.find_last_of(L"\\/");
+    path = (slash == std::wstring::npos ? std::wstring() : path.substr(0, slash + 1)) + L"settings.ini";
+    FILE* fp = nullptr;
+    if (_wfopen_s(&fp, path.c_str(), L"r") != 0 || !fp) return;
+    char line[512];
+    int applied = 0;
+    while (std::fgets(line, sizeof line, fp)) {
+        std::string s(line);
+        while (!s.empty() && (s.back() == '\n' || s.back() == '\r' || s.back() == ' ' || s.back() == '\t')) s.pop_back();
+        size_t a = s.find_first_not_of(" \t");
+        if (a == std::string::npos || s[a] == '#' || s[a] == ';' || s[a] == '[') continue;
+        size_t eq = s.find('=', a);
+        if (eq == std::string::npos) continue;
+        std::string k = s.substr(a, eq - a), v = s.substr(eq + 1);
+        while (!k.empty() && (k.back() == ' ' || k.back() == '\t')) k.pop_back();
+        size_t b = v.find_first_not_of(" \t");
+        v = (b == std::string::npos) ? std::string() : v.substr(b);
+        if (k.empty() || v.empty()) continue;
+        for (char& c : k) c = char(std::toupper(static_cast<unsigned char>(c)));
+        if (k.rfind("NX_", 0) != 0) k = "NX_" + k;
+        if (std::getenv(k.c_str())) continue;
+        _putenv_s(k.c_str(), v.c_str());
+        applied++;
+    }
+    std::fclose(fp);
+    nx::log("settings.ini: %d setting(s) applied", applied);
+}
 int main() {
+    load_settings_ini();
     nx::plat::start_memory_guard();  // before anything can grow: a leak must never freeze the machine (memguard_win.cpp)
     SetUnhandledExceptionFilter(crash_handler);
     if (const char* t = std::getenv("NX_THROW_TRACE"); t && *t == '1') AddVectoredExceptionHandler(1, throw_tracer);
