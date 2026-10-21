@@ -1,5 +1,3 @@
-#include <cstdio>
-#include <vector>
 // Windows host: memory, threads, time, files, the game window (F11 / Alt+Enter fullscreen), XInput + keyboard,
 // XAudio2, the Vulkan loader and win32 surface, crash handler, hardware watchpoints (NX_WATCH) and main().
 #include <algorithm>
@@ -148,157 +146,6 @@ static void toggle_fullscreen(HWND h) {
     g_fullscreen = !g_fullscreen;
 }
 
-// ---- F1 settings window: a separate Win32 window on its own thread. It edits settings.ini (read at the next start). ----
-struct SuiOpt { const wchar_t* label; const char* key; const char* on; };
-static const SuiOpt kSuiOpts[] = {
-    {L"Mute sound", "MUTE", "1"},
-    {L"Start in fullscreen", "FULLSCREEN", "1"},
-    {L"Handheld mode (720p)", "HANDHELD", "1"},
-    {L"Ultrawide view", "ULTRAWIDE", "1"},
-    {L"Limit to 30 fps", "FPS_CAP", "30"},
-};
-static const int kSuiCount = int(sizeof(kSuiOpts) / sizeof(kSuiOpts[0]));
-static HWND g_sui_boxes[8];
-static HWND g_sui_status = nullptr;
-static std::atomic<bool> g_sui_open{false};
-
-static std::wstring sui_path() {
-    wchar_t buf[MAX_PATH * 2];
-    const DWORD cap = DWORD(sizeof buf / sizeof buf[0]);
-    DWORD n = GetModuleFileNameW(nullptr, buf, cap);
-    if (n == 0 || n >= cap) return L"settings.ini";
-    std::wstring p(buf, n);
-    size_t s = p.find_last_of(L"\\/");
-    return (s == std::wstring::npos ? std::wstring() : p.substr(0, s + 1)) + L"settings.ini";
-}
-
-// "  key = value " -> key (upper case, without NX_) and value; false for blank or comment lines.
-static bool sui_parse(const std::string& line, std::string& k, std::string& v) {
-    size_t a = line.find_first_not_of(" \t\r\n");
-    if (a == std::string::npos || line[a] == '#' || line[a] == ';' || line[a] == '[') return false;
-    size_t eq = line.find('=', a);
-    if (eq == std::string::npos) return false;
-    k = line.substr(a, eq - a);
-    while (!k.empty() && (k.back() == ' ' || k.back() == '\t')) k.pop_back();
-    v = line.substr(eq + 1);
-    size_t b = v.find_first_not_of(" \t");
-    size_t e = v.find_last_not_of(" \t\r\n");
-    v = (b == std::string::npos) ? std::string() : v.substr(b, e - b + 1);
-    for (char& c : k) c = char(std::toupper(static_cast<unsigned char>(c)));
-    if (k.rfind("NX_", 0) == 0) k = k.substr(3);
-    return !k.empty();
-}
-
-static std::vector<std::string> sui_read() {
-    std::vector<std::string> out;
-    FILE* fp = nullptr;
-    if (_wfopen_s(&fp, sui_path().c_str(), L"r") != 0 || !fp) return out;
-    char buf[512];
-    while (std::fgets(buf, sizeof buf, fp)) {
-        std::string s(buf);
-        while (!s.empty() && (s.back() == '\n' || s.back() == '\r')) s.pop_back();
-        out.push_back(s);
-    }
-    std::fclose(fp);
-    return out;
-}
-
-// Keeps every line that is not one of ours, then writes the checked options.
-static bool sui_save() {
-    std::vector<std::string> keep;
-    for (const std::string& line : sui_read()) {
-        std::string k, v;
-        bool ours = false;
-        if (sui_parse(line, k, v))
-            for (const SuiOpt& o : kSuiOpts)
-                if (k == o.key) ours = true;
-        if (!ours) keep.push_back(line);
-    }
-    for (int i = 0; i < kSuiCount; i++)
-        if (SendMessageW(g_sui_boxes[i], BM_GETCHECK, 0, 0) == BST_CHECKED)
-            keep.push_back(std::string(kSuiOpts[i].key) + "=" + kSuiOpts[i].on);
-    FILE* fp = nullptr;
-    if (_wfopen_s(&fp, sui_path().c_str(), L"w") != 0 || !fp) return false;
-    for (const std::string& line : keep) std::fprintf(fp, "%s\n", line.c_str());
-    std::fclose(fp);
-    return true;
-}
-
-static LRESULT CALLBACK sui_proc(HWND h, UINT msg, WPARAM w, LPARAM l) {
-    switch (msg) {
-        case WM_COMMAND:
-            if (LOWORD(w) == 100)
-                SetWindowTextW(g_sui_status, sui_save() ? L"Saved. Restart the game to apply." : L"Could not write settings.ini");
-            else if (LOWORD(w) == 101)
-                DestroyWindow(h);
-            return 0;
-        case WM_CLOSE:
-            DestroyWindow(h);
-            return 0;
-        case WM_DESTROY:
-            PostQuitMessage(0);
-            return 0;
-    }
-    return DefWindowProcW(h, msg, w, l);
-}
-
-static DWORD WINAPI sui_thread(LPVOID) {
-    HINSTANCE inst = GetModuleHandleW(nullptr);
-    WNDCLASSW wc{};
-    wc.lpfnWndProc = sui_proc;
-    wc.hInstance = inst;
-    wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
-    wc.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_BTNFACE + 1);
-    wc.lpszClassName = L"WonderRecompSettings";
-    RegisterClassW(&wc);  // fails harmlessly when the class already exists
-    RECT r{0, 0, 320, 290};
-    AdjustWindowRect(&r, WS_CAPTION | WS_SYSMENU, FALSE);
-    const int ww = r.right - r.left, wh = r.bottom - r.top;
-    HWND h = CreateWindowExW(WS_EX_TOPMOST, wc.lpszClassName, L"Settings (F1)", WS_CAPTION | WS_SYSMENU | WS_VISIBLE,
-                             (GetSystemMetrics(SM_CXSCREEN) - ww) / 2, (GetSystemMetrics(SM_CYSCREEN) - wh) / 2, ww, wh, nullptr,
-                             nullptr, inst, nullptr);
-    if (!h) {
-        g_sui_open = false;
-        return 0;
-    }
-    HFONT font = static_cast<HFONT>(GetStockObject(DEFAULT_GUI_FONT));
-    auto add = [&](const wchar_t* cls, const wchar_t* text, DWORD style, int cx, int cy, int cw, int ch, int id) {
-        HWND c = CreateWindowExW(0, cls, text, WS_CHILD | WS_VISIBLE | style, cx, cy, cw, ch, h,
-                                 reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)), inst, nullptr);
-        SendMessageW(c, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
-        return c;
-    };
-    add(L"STATIC", L"Changes are saved to settings.ini and apply the next time the game starts.", 0, 20, 12, 280, 36, 0);
-    const std::vector<std::string> lines = sui_read();
-    for (int i = 0; i < kSuiCount; i++) {
-        bool checked = false;
-        for (const std::string& line : lines) {
-            std::string k, v;
-            if (!sui_parse(line, k, v) || k != kSuiOpts[i].key) continue;
-            checked = (v == kSuiOpts[i].on) || (std::string(kSuiOpts[i].on) == "1" && !v.empty() && v != "0");
-        }
-        g_sui_boxes[i] = add(L"BUTTON", kSuiOpts[i].label, BS_AUTOCHECKBOX | WS_TABSTOP, 24, 56 + i * 30, 270, 24, 200 + i);
-        if (checked) SendMessageW(g_sui_boxes[i], BM_SETCHECK, BST_CHECKED, 0);
-    }
-    g_sui_status = add(L"STATIC", L"", 0, 20, 214, 280, 20, 0);
-    add(L"BUTTON", L"Save", BS_PUSHBUTTON | WS_TABSTOP, 20, 246, 130, 28, 100);
-    add(L"BUTTON", L"Close", BS_PUSHBUTTON | WS_TABSTOP, 170, 246, 130, 28, 101);
-    SetForegroundWindow(h);
-    MSG m;
-    while (GetMessageW(&m, nullptr, 0, 0) > 0) {
-        TranslateMessage(&m);
-        DispatchMessageW(&m);
-    }
-    g_sui_open = false;
-    return 0;
-}
-
-static void sui_open() {
-    bool expected = false;
-    if (!g_sui_open.compare_exchange_strong(expected, true)) return;  // already open
-    HANDLE t = CreateThread(nullptr, 0, sui_thread, nullptr, 0, nullptr);
-    if (t) CloseHandle(t); else g_sui_open = false;
-}
 static LRESULT CALLBACK wndproc(HWND h, UINT msg, WPARAM w, LPARAM l) {
     switch (msg) {
         case WM_CLOSE:
@@ -306,7 +153,6 @@ static LRESULT CALLBACK wndproc(HWND h, UINT msg, WPARAM w, LPARAM l) {
             ExitProcess(0);
         case WM_KEYDOWN:
             if (w == VK_F11) toggle_fullscreen(h);
-            else if (w == VK_F1) sui_open();
             break;
         case WM_SYSKEYDOWN:
             if (w == VK_RETURN) {  // Alt+Enter
@@ -342,7 +188,7 @@ static void window_thread(std::atomic<bool>* ready) {
     int x = (GetSystemMetrics(SM_CXSCREEN) - w) / 2, y = (sh - h) / 2;
     // NX_HEADLESS: created hidden (the surface still needs a window), never brought to the front.
     const DWORD style = headless() ? (kWindowed & ~WS_VISIBLE) : kWindowed;
-    g_window = CreateWindowW(wc.lpszClassName, (widen(nx::game::kInfo.title) + L" (Switch recomp)  -  F1: settings  -  F11: fullscreen").c_str(), style,
+    g_window = CreateWindowW(wc.lpszClassName, (widen(nx::game::kInfo.title) + L" (Switch recomp)  -  F11: fullscreen").c_str(), style,
                              std::max(0, x), std::max(0, y), w, h, nullptr, nullptr, wc.hInstance, nullptr);
     if (const char* f = std::getenv("NX_FULLSCREEN"); f && *f == '1' && !headless()) toggle_fullscreen(g_window);
     if (!headless()) SetForegroundWindow(g_window);
